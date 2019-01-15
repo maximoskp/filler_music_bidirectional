@@ -152,10 +152,12 @@ for i in range(epochs):
         all_vars = tf.global_variables()
         saver = tf.train.Saver()
         saver.save(sess, 'saved_model/file.ckpt')
+        '''
         directory = 'all_saved_models/epoch_' + str(i) + '/saved_model/'
         if not os.path.exists(directory):
             os.makedirs(directory)
             saver.save(sess, directory + 'file.ckpt')
+        '''
 
 
 # save training errors
