@@ -10,6 +10,7 @@ from music21 import *
 import numpy as np
 import os
 import glob
+import math
 
 # the user should give the file name - the folder with the files
 def get_parts_np_from_file(fileName, parts_for_surface, time_res):
@@ -521,3 +522,138 @@ def get_concat_rel_pcp_np_from_folder(folderName, parts_for_surface, time_res, p
     '''
     
     return all_matrices, all_tonalities
+
+def get_concat_noFeats_squeezeOcts(folderName, parts_for_surface, time_res, transpose = False, bin_out=True, voice_aug=False, sparse_aug=False, register_aug=[], padding=32, octave_squeeze=-1):
+    # INPUTS:
+    # folderName - string: the name of the folder - full path
+    # parts_for_surface - int array or 'all': parts to include to score
+    # time_res - int: e.g. 16 or 32 etc.
+    # transpose: True/False - augment or not with all +-6 transpositions
+    # OUTPUTS:
+    # m: the score matrices in np array (128, max_len*n_pieces)
+    # f: the feature matrix in np array (128, max_len*n_pieces)
+    
+    allDocs = glob.glob(folderName + os.sep + "*.xml")
+    if len(allDocs) is 0:
+        print("Didn't find .xml file - looking for .mxl")
+        allDocs = glob.glob(folderName + os.sep + "*.mxl")
+        
+    
+    # keep all matrices for each file
+    all_matrices = []
+    # keep the respective lengths to define -1 - padding
+    all_lengths = []
+    
+    for fileName in allDocs:
+        m, l = get_parts_np_from_file(fileName, parts_for_surface, time_res)
+        if octave_squeeze > 0:
+            m = squeeze_into_N_octaves(m, 3)
+        all_matrices.append(m)
+        all_lengths.append(l)
+    
+    # find max length for padding
+    all_lengths = np.array(all_lengths)
+    max_length = np.max(all_lengths)
+    
+    # pad-em-all
+    if padding > 0:
+        for i in range(len(all_matrices)):
+            m = all_matrices[i]
+            # check if padding needed
+            if m.shape[1] < max_length:
+                # make a padding matrix
+                padder = np.zeros((m.shape[0], max_length-m.shape[1]))
+                all_matrices[i] = np.hstack( (m, padder) )
+    
+    all_matrices = np.hstack(all_matrices)
+    
+    # check if +-6 transposition has been asked
+    if transpose:
+        print('performing transpositions')
+        initMat = np.array(all_matrices)
+        for i in range(1,7):
+            print('transposition: ', str(i))
+            tmpMat = np.roll(initMat, i, axis=0)
+            all_matrices = np.hstack( (all_matrices, tmpMat) )
+        for i in range(1,7):
+            print('transposition: ', str(-i))
+            tmpMat = np.roll(initMat, -i, axis=0)
+            all_matrices = np.hstack( (all_matrices, tmpMat) )
+    
+    # check if only binary output is required
+    if bin_out:
+        print('generating binary output')
+        all_matrices[all_matrices > 0] = 1
+    
+    # check if voice-limit augmentation has been asked
+    if voice_aug:
+        # do voice augmentation
+        print('performing voice augmentation')
+        new_mat = np.zeros( all_matrices.shape )
+        for i in range(all_matrices.shape[1]):
+            if np.count_nonzero(all_matrices[:,i]) > 3:
+                passes = all_matrices[:,i].argsort()[-2:][::1]
+                new_mat[passes, i] = all_matrices[passes, i]
+            elif np.count_nonzero(all_matrices[:,i]) >= 1:
+                passes = all_matrices[:,i].argsort()[-1:][::1]
+                new_mat[passes, i] = all_matrices[passes, i]
+        all_matrices = np.hstack( (all_matrices, new_mat) )
+        # octave augmentation if is binary
+        if bin_out:
+            new_mat = np.zeros( all_matrices.shape )
+            for i in range(all_matrices.shape[1]):
+                new_mat[:,i] = np.logical_or( np.logical_or( all_matrices[:,i], np.roll(all_matrices[:,i], 12) ), np.roll(all_matrices[:,i], -12) )
+            all_matrices = np.hstack( (all_matrices, new_mat) )
+    
+    # check if sparsity augmentation has been asked
+    if sparse_aug:
+        # do sparsity augmentation
+        print('performing sparsity augmentation')
+        new_mat = np.zeros( all_matrices.shape )
+        for i in range(all_matrices.shape[1]):
+            if np.count_nonzero(all_matrices[:,i]) >= 1:
+                # decide for passing the column
+                if np.random.rand(1)[0] < 0.9/(1+ 0.2*(i%16) + 0.5*(i%8) + 0.5*(i%4) + 4*(i%2)):
+                    new_mat[:,i] = all_matrices[:,i]
+        all_matrices = np.hstack( (all_matrices, new_mat) )
+    
+    # check if register augmentation has been asked
+    if len(register_aug) > 0:
+        # do register augmentation
+        print('performing register augmentation')
+        new_all_matrices = np.array(all_matrices)
+        for shift in register_aug:
+            print('range shift: ', shift)
+            new_mat = np.zeros( all_matrices.shape )
+            for i in range(all_matrices.shape[1]):
+                # print('i: ', i)
+                if np.count_nonzero(all_matrices[:,i]) >= 1:
+                    new_mat[:,i] = np.roll(all_matrices[:,i], shift)
+            new_all_matrices = np.hstack( (new_all_matrices, new_mat) )
+        all_matrices = np.array( new_all_matrices )
+    
+    return all_matrices
+
+def squeeze_into_N_octaves(m, n, center=60):
+    # first get the vertical center of mass of the entire matrix
+    all_means = []
+    for i in range(m.shape[1]):
+        nz = np.where( m[:,i] > 0 )[0]
+        if len(nz) > 0:
+            all_means.append( np.mean(nz) )
+    all_means = np.array( all_means )
+    # center of mass
+    cm = np.mean( all_means )
+    # round center of mass to compute new center
+    cmr = int( np.floor( cm ) )
+    # compute displacement of the center of mass
+    dsp = center - cmr
+    # apply displacement
+    mc = np.roll(m, dsp, axis=0)
+    m_new = np.zeros( (12*n, m.shape[1]) )
+    m_new = mc[ (center- (12*int(np.floor(n/2))) ):(center+ (12*int(np.ceil(n/2))) ) , : ]
+    for i in range(center+ (12*int(np.ceil(n/2))) , 128, 1):
+        m_new[12+(i%12),:] = np.logical_or(m_new[12+(i%12),:], mc[i,:])
+    for i in range(0, center- (12*int(np.floor(n/2))) , 1):
+        m_new[(i%12)-12,:] = np.logical_or(m_new[(i%12)-12,:], mc[i,:])
+    return m_new

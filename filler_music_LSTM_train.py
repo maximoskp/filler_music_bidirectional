@@ -27,33 +27,16 @@ parts_for_surface = [0, 1]
 # time resolution should be set by the user
 time_res = 8
 
-m,f = s2n.get_concat_parts_np_from_folder(folderName, parts_for_surface, time_res, transpose=False, voice_aug=False, sparse_aug=True, register_aug=[])
-
-# normalize f
-f[0,:] = (f[0,:]-np.min(f[0,:]))/(np.max(f[0,:])-np.min(f[0,:]))
-f[1,:] = (f[1,:]-np.min(f[1,:]))/(np.max(f[1,:])-np.min(f[1,:]))
-# shift f by one
-f[0,:] = np.roll( f[0,:], 1 )
-f[1,:] = np.roll( f[1,:], 1 )
-f[0,0] = 0
-f[1,0] = 0
-
-# find limits
-lowest_limit = np.min( np.where( np.sum(m, axis=1) ) )
-highest_limit = np.max( np.where( np.sum(m, axis=1) ) )
-
-m = m[lowest_limit:highest_limit, :]
-
-all_matrices = np.vstack( (f,m) )
+m = s2n.get_concat_noFeats_squeezeOcts(folderName, parts_for_surface, time_res, transpose=False, voice_aug=False, sparse_aug=True, register_aug=[], padding=32, octave_squeeze=3)
 
 # PREPARE DATA FOR LSTM =======================================================
 # test batch generation example
-max_len = 16
-batch_size = 320
+max_len = 32
+batch_size = 640
 step = 1
-input_rows = m.shape[0] + f.shape[0]
+input_rows = m.shape[0]
 output_rows = m.shape[0]
-num_units = [32, 64, 32]
+num_units = [32, 32]
 learning_rate = 0.001
 epochs = 5000
 temperature = 0.5
@@ -64,8 +47,8 @@ all_training_errors = np.zeros(epochs)
 input_mats = []
 output_mats = []
 
-for i in range(0, all_matrices.shape[1] - max_len, step):
-    input_mats.append(all_matrices[:,i:i+max_len])
+for i in range(0, m.shape[1] - max_len, step):
+    input_mats.append(m[:,i:i+max_len])
     output_mats.append(m[:,i+max_len])
 
 # make training and testing tensors
@@ -76,7 +59,7 @@ for i in range(len(input_mats)):
     target_data[i,:] = output_mats[i]
 
 # make batches
-num_batches = int( all_matrices.shape[1]/batch_size )
+num_batches = int( m.shape[1]/batch_size )
 count = 0
 all_batches = [] # actually don't need it
 for _ in range(num_batches):
@@ -86,7 +69,7 @@ for _ in range(num_batches):
 
 # save train batch for getting seed
 seed = train_batch[:1:]
-np.savez('saved_data/training_data.npz', m=m, f=f, lowest_limit=lowest_limit, highest_limit=highest_limit, seed=seed)
+np.savez('saved_data/training_data.npz', m=m, seed=seed)
 
 tf.reset_default_graph()
 
@@ -99,9 +82,12 @@ def rnn(x, weight, bias, input_rows):
     x = tf.reshape(x, [-1, input_rows])
     x = tf.split(x, max_len, 0)
     
-    cells = [tf.contrib.rnn.BasicLSTMCell(num_units=n) for n in num_units]
-    stacked_rnn_cell = tf.contrib.rnn.MultiRNNCell(cells)
-    outputs, states = tf.contrib.rnn.static_rnn(stacked_rnn_cell, x, dtype=tf.float32)
+    fw_cells = [tf.contrib.rnn.BasicLSTMCell(num_units=n) for n in num_units]
+    # fw_stacked_rnn_cell = tf.contrib.rnn.MultiRNNCell(fw_cells)
+    bw_cells = [tf.contrib.rnn.BasicLSTMCell(num_units=n) for n in num_units]
+    # bw_stacked_rnn_cell = tf.contrib.rnn.MultiRNNCell(bw_cells)
+    outputs, _, _ = tf.contrib.rnn.stack_bidirectional_rnn(fw_cells, bw_cells, x, dtype='float32')
+    # outputs, states = tf.contrib.rnn.static_rnn(stacked_rnn_cell, x, dtype=tf.float32)
     prediction = tf.matmul(outputs[-1], weight) + bias
     return prediction
 # end rnn
@@ -124,10 +110,12 @@ def sample(predicted_in):
 
 x = tf.placeholder("float", [None, max_len, input_rows])
 y = tf.placeholder("float", [None, output_rows])
-weight = tf.Variable(tf.random_normal([num_units[-1], output_rows]))
-bias = tf.Variable(tf.random_normal([output_rows]))
+# weight_in = tf.Variable(tf.random_normal([num_units[0], input_rows]))
+# bias_in = tf.Variable(tf.random_normal([input_rows]))
+weight_out = tf.Variable(tf.random_normal([2*num_units[-1], output_rows]))
+bias_out = tf.Variable(tf.random_normal([output_rows]))
 
-prediction = rnn(x, weight, bias, input_rows)
+prediction = rnn(x, weight_out, bias_out, input_rows)
 dist = tf.nn.sigmoid_cross_entropy_with_logits(logits=prediction, labels=y)
 # dist = tf.reduce_mean(tf.norm(prediction - y, ord=10.0))
 # dist = tf.nn.sigmoid_cross_entropy(logits=prediction, multiclass_labels=y)
@@ -157,7 +145,7 @@ for i in range(epochs):
     print( "cost_value: ", cost_value[0] )
     all_training_errors[i] = cost_value[0]
     if min_cost > cost_value[0] and i > 500:
-        tmpW_1 = sess.run(weight)
+        tmpW_1 = sess.run(weight_out)
         min_cost = cost_value[0]
         print("saving model")
         # save model
